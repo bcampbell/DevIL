@@ -17,185 +17,351 @@
 #include "il_internal.h"
 #include "il_stack.h"
 
+// TODO: this should be in IL/il.h
+ILboolean ILAPIENTRY ilActive(ILuint frame, ILuint mipmap, ILuint layer, ILuint face);
+
+typedef struct SlotID {
+    ILuint frame,mipmap,layer,face;
+} SlotID;
+
+
+typedef struct SlotEntry {
+    SlotID id;
+    ILimage *img;
+} SlotEntry;
+
+typedef struct Slot {
+    SlotID extents;
+    ILuint capacity;
+    ILuint length;
+    SlotEntry* images;
+} Slot;
+
+
+typedef struct Stack {
+    ILuint length;
+    ILuint capacity;
+    Slot** slots;
+} Stack;
+
+
+// TODO: iCurImage should be here too.
 ILuint CurName = 0;
+SlotID CurActive = {0};
+
+static ILboolean IsInit = IL_FALSE;
+static const SlotID slotid_ZERO  = {0};
+static Stack imageStack = {0};
 
 // Internal stuff
 
-// Just a guess...seems large enough
-#define I_STACK_INCREMENT 1024
+//static ILboolean	OnExit = IL_FALSE;
+//static ILboolean	ParentImage = IL_TRUE;
 
-typedef struct iFree
+
+static int slotid_cmp(const SlotID a, const SlotID b);
+static Slot* slot_create();
+static int slot_add(Slot* slot, const SlotID id);
+static void slot_delete(Slot* slot);
+static int slot_findimage(Slot* slot, const SlotID id);
+static ILboolean stack_init(Stack* s);
+static void stack_cleanup(Stack* s);
+static ILboolean stack_allocslot(Stack* s, ILuint *found);
+
+
+static int slotid_cmp(const SlotID a, const SlotID b)
 {
-	ILuint	Name;
-	void	*Next;
-} iFree;
+    if (a.frame>b.frame) {
+        return 1;
+    } else if (a.frame<b.frame) {
+        return -1;
+    }
+
+    if (a.mipmap>b.mipmap) {
+        return 1;
+    } else if (a.mipmap<b.mipmap) {
+        return -1;
+    }
+
+    if (a.layer>b.layer) {
+        return 1;
+    } else if (a.layer<b.layer) {
+        return -1;
+    }
+
+    if (a.face>b.face) {
+        return 1;
+    } else if (a.face<b.face) {
+        return -1;
+    }
+
+    // if we got this far, they're equal!
+    return 0;
+}
 
 
-static ILboolean iEnlargeStack();
+static Slot* slot_create()
+{
+    const int initialcap = 1;
+    Slot* slot = ialloc(sizeof(Slot));
 
-static ILuint		StackSize = 0;
-static ILuint		LastUsed = 0;
+    if (slot==NULL) {
+        return NULL;
+    }
 
-// two fixed slots - slot 0 is default (fallback) image, slot 1 is temp image
-static ILimage		**ImageStack = NULL;
+    slot->extents = slotid_ZERO;
+    slot->length = 0;
+    slot->images = ialloc(initialcap*sizeof(SlotEntry));
+    slot->capacity = initialcap;
+    if (slot->images==NULL) {
+        ifree(slot);
+        return NULL;
+    }
 
-static iFree		*FreeNames = NULL;
-static ILboolean	OnExit = IL_FALSE;
-static ILboolean	ParentImage = IL_TRUE;
+    // add default image (ie frame0, mip0, layer0 face0)
+    if (slot_add(slot, slotid_ZERO) <0) {
+        slot_delete(slot);
+        return NULL;
+    }
+
+    return slot;
+}
+
+
+// delete a slot and all it's images
+static void slot_delete(Slot* slot)
+{
+    int i;
+    for(i=0; i<slot->length; ++i) {
+        ilCloseImage( slot->images[i].img );
+    }
+    ifree(slot->images);
+    ifree(slot);
+}
+
+
+// adds a new entry into the slot (assumes that id isn't present!)
+static int slot_add(Slot* slot, const SlotID id)
+{
+
+    if (slot->length >= slot->capacity) {
+        // TODO: grow the slot...
+        return -1;
+    }
+
+    ILimage* img = ilNewImage(1,1,1,1,1);
+    if (img==NULL) {
+        return -1;
+    }
+
+    // TODO: insert in order of id, so we can binarysearch
+
+    // for now... just append
+    int idx = slot->length;
+    ++slot->length;
+    slot->images[idx].id = id;
+    slot->images[idx].img = img;
+
+    // update the maximum frame/mip/layer/face values
+    if (id.frame > slot->extents.frame ) {
+        slot->extents.frame = id.frame;
+    }
+    if (id.mipmap > slot->extents.mipmap ) {
+        slot->extents.mipmap = id.mipmap;
+    }
+    if (id.layer > slot->extents.layer ) {
+        slot->extents.layer = id.layer;
+    }
+    if (id.face > slot->extents.face ) {
+        slot->extents.face = id.face;
+    }
+
+    return idx;
+}
+
+
+
+
+static int slot_findimage(Slot* slot, const SlotID id)
+{
+    // TODO: just a linear search. fine for small sets, but the idea is that
+    // we'll keep the list sorted, so we can do a quick binary search instead.
+    int i;
+    for(i=0; i<slot->length; ++i) {
+        if(slotid_cmp(id, slot->images[i].id) == 0 ) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+
+
+
+static ILboolean stack_init(Stack* s)
+{
+    s->length = 0;
+    s->capacity = 16;
+    s->slots = ialloc(s->capacity * sizeof(Slot));
+    if (s->slots == NULL) {
+        return IL_FALSE;
+    }
+
+
+    // create default image
+    s->slots[0] = slot_create();
+    if (s->slots[0]==NULL) {
+        return IL_FALSE;
+    }
+    // TODO: use ilDefaultImage to generate default image date
+
+    // create temp image
+    s->slots[1] = slot_create();
+    if (s->slots[1]==NULL) {
+        return IL_FALSE;
+    }
+}
+
+
+static void stack_cleanup(Stack* s)
+{
+    if(s->slots == NULL) {
+        return;
+    }
+
+    ILuint i;
+    for (i=0; i<s->length; ++i) {
+        if (s->slots[i]==NULL) {
+            continue;
+        }
+        slot_delete(s->slots[i]);
+    }
+    ifree(s->slots);
+    // just to be tidy...
+    s->length = 0;
+    s->capacity = 0;
+    s->slots=NULL;
+}
+
+
+
+// return -1 if out of memory
+static ILboolean stack_allocslot(Stack* s, ILuint *found)
+{
+    ILuint idx;
+    if(s->length < s->capacity) {
+        *found = s->length;
+        ++s->length;
+        return IL_TRUE;
+    }
+
+    // We're at capacity. Is there one we can reuse?
+    for (idx=0; idx<s->length; ++idx) {
+        if( s->slots[idx] == NULL ) {
+            *found = idx;
+            return IL_TRUE;
+        }
+    }
+
+    // nope. grow.
+    {
+        int newcap = s->capacity*2;
+        Slot** old = s->slots;
+        s->slots = ialloc( newcap * sizeof(Slot) );
+        if (s->slots==NULL) {
+            return IL_FALSE;
+        }
+        memcpy(s->slots, old, s->capacity * sizeof(Slot) );
+        ifree(old);
+        s->capacity = newcap;
+        *found = s->length;
+        ++s->length;
+        return IL_TRUE;
+    }
+}
+
+
 
 
 //! Creates Num images and puts their index in Images - similar to glGenTextures().
 void ILAPIENTRY ilGenImages(ILsizei Num, ILuint *Images)
 {
-	ILsizei	Index = 0;
-	iFree	*TempFree = FreeNames;
-
 	if (Num < 1 || Images == NULL) {
 		ilSetError(IL_INVALID_VALUE);
 		return;
 	}
 
-	// No images have been generated yet, so create the image stack.
-	if (ImageStack == NULL)
-		if (!iEnlargeStack())
-			return;
-
-	do {
-		if (FreeNames != NULL) {  // If any have been deleted, then reuse their image names.
-                        TempFree = (iFree*)FreeNames->Next;
-                        Images[Index] = FreeNames->Name;
-                        ImageStack[FreeNames->Name] = ilNewImage(1, 1, 1, 1, 1);
-                        ifree(FreeNames);
-                        FreeNames = TempFree;
-		} else {
-                        if (LastUsed >= StackSize)
-				if (!iEnlargeStack())
-					return;
-			Images[Index] = LastUsed;
-			// Must be all 1's instead of 0's, because some functions would divide by 0.
-			ImageStack[LastUsed] = ilNewImage(1, 1, 1, 1, 1);
-			LastUsed++;
-		}
-	} while (++Index < Num);
-
-	return;
+	ILsizei	i;
+    for (i=0; i<Num; ++i) {
+        ILuint im = ilGenImage();
+        Images[i] = im;
+    }
 }
+
 
 ILuint ILAPIENTRY ilGenImage()
 {
-    ILuint i;
-    ilGenImages(1,&i);
-    return i;
+    ILuint idx;
+    if( stack_allocslot(&imageStack, &idx) == IL_FALSE) {
+        return 0;
+    }
+
+    Slot* slot = slot_create();
+    if(slot==NULL) {
+        return 0;
+    }
+
+    imageStack.slots[idx] = slot;
+    return idx;
 }
+
+
+
 
 //! Makes Image the current active image - similar to glBindTexture().
 void ILAPIENTRY ilBindImage(ILuint Image)
 {
-	if (ImageStack == NULL || StackSize == 0) {
-		if (!iEnlargeStack()) {
-			return;
-		}
-	}
+    if(!ilIsImage(Image)) {
+		ilSetError(IL_INVALID_VALUE);
+		return;
+    }
 
-	// If the user requests a high image name.
-	while (Image >= StackSize) {
-		if (!iEnlargeStack()) {
-			return;
-		}
-	}
-
-	if (ImageStack[Image] == NULL) {
-		ImageStack[Image] = ilNewImage(1, 1, 1, 1, 1);
-		if (Image >= LastUsed) // >= ?
-			LastUsed = Image + 1;
-	}
-
-	iCurImage = ImageStack[Image];
+    // we can rely on first entry of slot being present
+	iCurImage = imageStack.slots[Image]->images[0].img;
 	CurName = Image;
-
-	ParentImage = IL_TRUE;
-
-	return;
+    CurActive = slotid_ZERO;
 }
 
 
 //! Deletes Num images from the image stack - similar to glDeleteTextures().
 void ILAPIENTRY ilDeleteImages(ILsizei Num, const ILuint *Images)
 {
-	iFree	*Temp = FreeNames;
-	ILuint	Index = 0;
-
-	if (Num < 1) {
-		//ilSetError(IL_INVALID_VALUE);
-		return;
-	}
-	if (StackSize == 0)
-		return;
-
-	do {
-		if (Images[Index] > 0 && Images[Index] < LastUsed) {  // <= ?
-			/*if (FreeNames != NULL) {  // Terribly inefficient
-				Temp = FreeNames;
-				do {
-					if (Temp->Name == Images[Index]) {
-						continue;  // Sufficient?
-					}
-				} while ((Temp = Temp->Next));
-			}*/
-
-			// Already has been deleted or was never used.
-			if (ImageStack[Images[Index]] == NULL)
-				continue;
-
-			// Find out if current image - if so, set to default image zero.
-			if (Images[Index] == CurName || Images[Index] == 0) {
-				iCurImage = ImageStack[0];
-				CurName = 0;
-			}
-			
-			// Should *NOT* be NULL here!
-			ilCloseImage(ImageStack[Images[Index]]);
-			ImageStack[Images[Index]] = NULL;
-
-			// Add to head of list - works for empty and non-empty lists
-			Temp = (iFree*)ialloc(sizeof(iFree));
-			if (!Temp) {
-				return;
-			}
-			Temp->Name = Images[Index];
-			Temp->Next = FreeNames;
-			FreeNames = Temp;
-		}
-		/*else {  // Shouldn't set an error...just continue onward.
-			ilSetError(IL_ILLEGAL_OPERATION);
-		}*/
-	} while (++Index < (ILuint)Num);
+    int i;
+    for (i=0; i<Num; ++i) {
+        ilDeleteImage(Images[i]);
+    }
 }
 
-
 void ILAPIENTRY ilDeleteImage(const ILuint Num) {
-    ilDeleteImages(1,&Num);
+    // TODO: could prevent user from deleting slots 0 and 1 (default and temp)
+    if(!ilIsImage(Num)) {
+		ilSetError(IL_INVALID_VALUE);
+		return;
+    }
+    slot_delete( imageStack.slots[Num] );
+    imageStack.slots[Num] = NULL;
 }
 
 //! Checks if Image is a valid ilGenImages-generated image (like glIsTexture()).
 ILboolean ILAPIENTRY ilIsImage(ILuint Image)
 {
-	//iFree *Temp = FreeNames;
-
-	if (ImageStack == NULL)
-		return IL_FALSE;
-	if (Image >= LastUsed || Image == 0)
-		return IL_FALSE;
-
-	/*do {
-		if (Temp->Name == Image)
-			return IL_FALSE;
-	} while ((Temp = Temp->Next));*/
-
-	if (ImageStack[Image] == NULL)  // Easier check.
-		return IL_FALSE;
-
-	return IL_TRUE;
+    if (Image>=imageStack.length) {
+        return IL_FALSE;
+    }
+    if (imageStack.slots[Image]==NULL) {
+        return IL_FALSE;
+    }
+    return IL_TRUE;
 }
 
 
@@ -293,168 +459,66 @@ ILAPI void ILAPIENTRY ilClosePal(ILpal *Palette)
 }
 
 
+// only used by il_state.c
+// TODO: kill kill kill!
 ILimage *iGetBaseImage()
 {
-	return ImageStack[ilGetCurName()];
+	return imageStack.slots[ilGetCurName()]->images[0].img;
 }
 
 
 //! Sets the current mipmap level
 ILboolean ILAPIENTRY ilActiveMipmap(ILuint Number)
 {
-	ILuint Current;
-    ILimage *iTempImage;
-
-	if (iCurImage == NULL) {
-		ilSetError(IL_ILLEGAL_OPERATION);
-		return IL_FALSE;
-	}
-
-	if (Number == 0) {
-		return IL_TRUE;
-	}
-
-    iTempImage = iCurImage;
-	iCurImage = iCurImage->Mipmaps;
-	if (iCurImage == NULL) {
-		iCurImage = iTempImage;
-		ilSetError(IL_ILLEGAL_OPERATION);
-		return IL_FALSE;
-	}
-
-	for (Current = 1; Current < Number; Current++) {
-		iCurImage = iCurImage->Mipmaps;
-		if (iCurImage == NULL) {
-			ilSetError(IL_ILLEGAL_OPERATION);
-			iCurImage = iTempImage;
-			return IL_FALSE;
-		}
-	}
-
-	ParentImage = IL_FALSE;
-
-	return IL_TRUE;
+    return ilActive(CurActive.frame, CurActive.mipmap+Number, CurActive.layer, CurActive.face);
 }
+
 
 
 //! Used for setting the current image if it is an animation.
 ILboolean ILAPIENTRY ilActiveImage(ILuint Number)
 {
-	ILuint Current;
-    ILimage *iTempImage;
-    
-	if (iCurImage == NULL) {
-		ilSetError(IL_ILLEGAL_OPERATION);
-		return IL_FALSE;
-	}
-
-	if (Number == 0) {
-		return IL_TRUE;
-	}
-
-    iTempImage = iCurImage;
-	iCurImage = iCurImage->Next;
-	if (iCurImage == NULL) {
-		iCurImage = iTempImage;
-		ilSetError(IL_ILLEGAL_OPERATION);
-		return IL_FALSE;
-	}
-
-	Number--;  // Skip 0 (parent image)
-	for (Current = 0; Current < Number; Current++) {
-		iCurImage = iCurImage->Next;
-		if (iCurImage == NULL) {
-			ilSetError(IL_ILLEGAL_OPERATION);
-			iCurImage = iTempImage;
-			return IL_FALSE;
-		}
-	}
-
-	ParentImage = IL_FALSE;
-
-	return IL_TRUE;
+    return ilActive(CurActive.frame+Number, CurActive.mipmap, CurActive.layer, CurActive.face);
 }
 
 
 //! Used for setting the current face if it is a cubemap.
 ILboolean ILAPIENTRY ilActiveFace(ILuint Number)
 {
-	ILuint Current;
-    ILimage *iTempImage;
-
-	if (iCurImage == NULL) {
-		ilSetError(IL_ILLEGAL_OPERATION);
-		return IL_FALSE;
-	}
-
-	if (Number == 0) {
-		return IL_TRUE;
-	}
-
-    iTempImage = iCurImage;
-	iCurImage = iCurImage->Faces;
-	if (iCurImage == NULL) {
-		iCurImage = iTempImage;
-		ilSetError(IL_ILLEGAL_OPERATION);
-		return IL_FALSE;
-	}
-
-	//Number--;  // Skip 0 (parent image)
-	for (Current = 1; Current < Number; Current++) {
-		iCurImage = iCurImage->Faces;
-		if (iCurImage == NULL) {
-			ilSetError(IL_ILLEGAL_OPERATION);
-			iCurImage = iTempImage;
-			return IL_FALSE;
-		}
-	}
-
-	ParentImage = IL_FALSE;
-
-	return IL_TRUE;
+    return ilActive(CurActive.frame, CurActive.mipmap, CurActive.layer, CurActive.face+Number);
 }
+
 
 
 
 //! Used for setting the current layer if layers exist.
 ILboolean ILAPIENTRY ilActiveLayer(ILuint Number)
 {
-	ILuint Current;
-    ILimage *iTempImage;
-
-	if (iCurImage == NULL) {
-		ilSetError(IL_ILLEGAL_OPERATION);
-		return IL_FALSE;
-	}
-
-	if (Number == 0) {
-		return IL_TRUE;
-	}
-
-    iTempImage = iCurImage;
-	iCurImage = iCurImage->Layers;
-	if (iCurImage == NULL) {
-		iCurImage = iTempImage;
-		ilSetError(IL_ILLEGAL_OPERATION);
-		return IL_FALSE;
-	}
-
-	//Number--;  // Skip 0 (parent image)
-	for (Current = 1; Current < Number; Current++) {
-		iCurImage = iCurImage->Layers;
-		if (iCurImage == NULL) {
-			ilSetError(IL_ILLEGAL_OPERATION);
-			iCurImage = iTempImage;
-			return IL_FALSE;
-		}
-	}
-
-	ParentImage = IL_FALSE;
-
-	return IL_TRUE;
+    return ilActive(CurActive.frame, CurActive.mipmap, CurActive.layer+Number, CurActive.face);
 }
 
 
+ILboolean ILAPIENTRY ilActive(ILuint frame, ILuint mipmap, ILuint layer, ILuint face)
+{
+    SlotID id = {frame,mipmap,layer,face};
+    Slot* slot = imageStack.slots[CurName];
+    int idx = slot_findimage(slot,id);
+    if (idx==-1) {
+        // don't have this one - need to add it
+        idx = slot_add(slot,id);
+        if (idx==-1) {
+            return IL_FALSE;
+        }
+
+    }
+
+    iCurImage = slot->images[idx].img;
+}
+
+
+
+
+// TODO: deprecated?
 ILuint ILAPIENTRY ilCreateSubImage(ILenum Type, ILuint Num)
 {
 	ILimage	*SubImage;
@@ -514,13 +578,12 @@ ILuint ILAPIENTRY ilCreateSubImage(ILenum Type, ILuint Num)
 // Returns the current index.
 ILAPI ILuint ILAPIENTRY ilGetCurName()
 {
-	if (iCurImage == NULL || ImageStack == NULL || StackSize == 0)
-		return 0;
 	return CurName;
 }
 
 
 // Returns the current image.
+// (TODO: probably just remove this - _everywhere_ just uses iCurImage directly)
 ILAPI ILimage* ILAPIENTRY ilGetCurImage()
 {
 	return iCurImage;
@@ -528,73 +591,31 @@ ILAPI ILimage* ILAPIENTRY ilGetCurImage()
 
 
 // To be only used when the original image is going to be set back almost immediately.
+// TODO: make sure this plays nice with stack?
 ILAPI void ILAPIENTRY ilSetCurImage(ILimage *Image)
 {
 	iCurImage = Image;
-	return;
 }
 
-
+//TODO
 // Completely replaces the current image and the version in the image stack.
 ILAPI void ILAPIENTRY ilReplaceCurImage(ILimage *Image)
 {
+    Slot* slot = imageStack.slots[CurName];
+    int idx;
 	if (iCurImage) {
-		ilActiveImage(0);
 		ilCloseImage(iCurImage);
 	}
-	ImageStack[ilGetCurName()] = Image;
+
+    idx = slot_findimage(slot, CurActive); 
+    // assert(idx>=0);
+	imageStack.slots[ilGetCurName()]->images[idx].img = Image;
 	iCurImage = Image;
-	ParentImage = IL_TRUE;
-	return;
 }
 
 
-// Like realloc but sets new memory to 0.
-void* ILAPIENTRY ilRecalloc(void *Ptr, ILuint OldSize, ILuint NewSize)
-{
-	void *Temp = ialloc(NewSize);
-	ILuint CopySize = (OldSize < NewSize) ? OldSize : NewSize;
-
-	if (Temp != NULL) {
-		if (Ptr != NULL) {
-			memcpy(Temp, Ptr, CopySize);
-			ifree(Ptr);
-		}
-
-		Ptr = Temp;
-
-		if (OldSize < NewSize)
-			imemclear((ILubyte*)Temp + OldSize, NewSize - OldSize);
-	}
-
-	return Temp;
-}
 
 
-// Internal function to enlarge the image stack by I_STACK_INCREMENT members.
-ILboolean iEnlargeStack()
-{
-	// 02-05-2001:  Moved from ilGenImages().
-	// Puts the cleanup function on the exit handler once.
-	if (!OnExit) {
-		#ifdef _MEM_DEBUG
-			AddToAtexit();  // So iFreeMem doesn't get called after unfreed information.
-		#endif//_MEM_DEBUG
-#if (!defined(_WIN32_WCE)) && (!defined(IL_STATIC_LIB))
-			atexit((void*)ilShutDown);
-#endif
-		OnExit = IL_TRUE;
-	}
-
-	if (!(ImageStack = (ILimage**)ilRecalloc(ImageStack, StackSize * sizeof(ILimage*), (StackSize + I_STACK_INCREMENT) * sizeof(ILimage*)))) {
-		return IL_FALSE;
-	}
-	StackSize += I_STACK_INCREMENT;
-	return IL_TRUE;
-}
-
-
-static ILboolean IsInit = IL_FALSE;
 
 // ONLY call at startup.
 void ILAPIENTRY ilInit()
@@ -602,7 +623,7 @@ void ILAPIENTRY ilInit()
 	// if it is already initialized skip initialization
 	if (IsInit == IL_TRUE ) 
 		return;
-	
+
 	//ilSetMemory(NULL, NULL);  Now useless 3/4/2006 (due to modification in il_alloc.c)
 	ilSetError(IL_NO_ERROR);
 	ilDefaultStates();  // Set states to their defaults.
@@ -612,10 +633,10 @@ void ILAPIENTRY ilInit()
 #if (!defined(_WIN32_WCE)) && (!defined(IL_STATIC_LIB))
 	atexit((void*)ilRemoveRegistered);
 #endif
+    if (!stack_init(&imageStack)) {
+        return;
+    }
 	//_WIN32_WCE
-	//ilShutDown();
-	iSetImage0();  // Beware!  Clears all existing textures!
-	iBindImageTemp();  // Go ahead and create the temporary image.
 	IsInit = IL_TRUE;
 	return;
 }
@@ -626,71 +647,21 @@ void ILAPIENTRY ilInit()
 void ILAPIENTRY ilShutDown()
 {
 	// if it is not initialized do not shutdown
-	iFree* TempFree = (iFree*)FreeNames;
 	ILuint i;
 	
-	if (!IsInit)
-		return;
-
 	if (!IsInit) {  // Prevent from being called when not initialized.
 		ilSetError(IL_ILLEGAL_OPERATION);
 		return;
 	}
 
-	while (TempFree != NULL) {
-		FreeNames = (iFree*)TempFree->Next;
-		ifree(TempFree);
-		TempFree = FreeNames;
-	}
-
-	//for (i = 0; i < LastUsed; i++) {
-	for (i = 0; i < StackSize; i++) {
-		if (ImageStack[i] != NULL)
-			ilCloseImage(ImageStack[i]);
-	}
-
-	if (ImageStack)
-		ifree(ImageStack);
-	ImageStack = NULL;
-	LastUsed = 0;
-	StackSize = 0;
+    stack_cleanup(&imageStack);
+    // TODO: tidy up CurName, iCurImage, CurActive vars?
 	IsInit = IL_FALSE;
-	return;
 }
 
-
-// Initializes the image stack's first entry (default image) -- ONLY CALL ONCE!
-void iSetImage0()
-{
-	if (ImageStack == NULL)
-		if (!iEnlargeStack())
-			return;
-
-	LastUsed = 1;
-	CurName = 0;
-	ParentImage = IL_TRUE;
-	if (!ImageStack[0])
-		ImageStack[0] = ilNewImage(1, 1, 1, 1, 1);
-	iCurImage = ImageStack[0];
-	ilDefaultImage();
-
-	return;
-}
 
 
 ILAPI void ILAPIENTRY iBindImageTemp()
 {
-	if (ImageStack == NULL || StackSize <= 1)
-		if (!iEnlargeStack())
-			return;
-
-	if (LastUsed < 2)
-		LastUsed = 2;
-	CurName = 1;
-	ParentImage = IL_TRUE;
-	if (!ImageStack[1])
-		ImageStack[1] = ilNewImage(1, 1, 1, 1, 1);
-	iCurImage = ImageStack[1];
-
-	return;
+    ilBindImage(1);
 }
