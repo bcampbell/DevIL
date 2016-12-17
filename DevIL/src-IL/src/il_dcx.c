@@ -202,18 +202,10 @@ ILboolean iLoadDcxInternal()
 		if (Image == NULL)
 			return IL_FALSE;
 
-		if (i == 0) {
-			ilTexImage(Image->Width, Image->Height, 1, Image->Bpp, Image->Format, Image->Type, Image->Data);
-			Base = iCurImage;
-			Base->Origin = IL_ORIGIN_UPPER_LEFT;
-			ilCloseImage(Image);
-		}
-		else {
-			iCurImage->Next = Image;
-			iCurImage = iCurImage->Next;
-		}
+        ilActiveFrame(i);
+        ilReplaceCurImage(Image);
 	}
-
+    ilActiveFrame(0);
 	return ilFixImage();
 }
 

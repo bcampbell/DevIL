@@ -129,8 +129,6 @@ ILboolean iLoadMdlInternal()
 	ILuint		Id, Version, NumTex, TexOff, TexDataOff, Position, ImageNum;
 	ILubyte		*TempPal;
 	TEX_HEAD	TexHead;
-	ILimage		*BaseImage=NULL;
-	ILboolean	BaseCreated = IL_FALSE;
 
 	if (iCurImage == NULL) {
 		ilSetError(IL_ILLEGAL_OPERATION);
@@ -174,23 +172,12 @@ ILboolean iLoadMdlInternal()
 			return IL_FALSE;
 		}
 
-		if (!BaseCreated) {
-			ilTexImage(TexHead.Width, TexHead.Height, 1, 1, IL_COLOUR_INDEX, IL_UNSIGNED_BYTE, NULL);
-			iCurImage->Origin = IL_ORIGIN_LOWER_LEFT;
-			BaseCreated = IL_TRUE;
-			BaseImage = iCurImage;
-			//iCurImage->NumNext = NumTex - 1;  // Don't count the first image.
-		}
-		else {
-			//iCurImage->Next = ilNewImage(TexHead.Width, TexHead.Height, 1, 1, 1);
-			iCurImage = iCurImage->Next;
-			iCurImage->Format = IL_COLOUR_INDEX;
-			iCurImage->Type = IL_UNSIGNED_BYTE;
-		}
+        ilActiveFrame(ImageNum);
+        ilTexImage(TexHead.Width, TexHead.Height, 1, 1, IL_COLOUR_INDEX, IL_UNSIGNED_BYTE, NULL);
+        iCurImage->Origin = IL_ORIGIN_LOWER_LEFT;
 
 		TempPal	= (ILubyte*)ialloc(768);
 		if (TempPal == NULL) {
-			iCurImage = BaseImage;
 			return IL_FALSE;
 		}
 		iCurImage->Pal.Palette = TempPal;
@@ -203,6 +190,8 @@ ILboolean iLoadMdlInternal()
 		if (iread(iCurImage->Pal.Palette, 1, 768) != 768)
 			return IL_FALSE;
 
+
+        // TODO: check - does ilFixImage() handle this?
 		if (ilGetBoolean(IL_CONV_PAL) == IL_TRUE) {
 			ilConvertImage(IL_RGB, IL_UNSIGNED_BYTE);
 		}
@@ -210,9 +199,11 @@ ILboolean iLoadMdlInternal()
 		iseek(Position, IL_SEEK_SET);
 	}
 
-	iCurImage = BaseImage;
+    ilActiveFrame(0);
 
 	return ilFixImage();
 }
+
+
 
 #endif//IL_NO_MDL

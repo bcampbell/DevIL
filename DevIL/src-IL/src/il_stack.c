@@ -496,6 +496,11 @@ ILboolean ILAPIENTRY ilActiveImage(ILuint Number)
     return ilActive(CurActive.frame+Number, CurActive.mipmap, CurActive.layer, CurActive.face);
 }
 
+ILboolean ILAPIENTRY ilActiveFrame(ILuint Number)
+{
+    return ilActive(Number, CurActive.mipmap, CurActive.layer, CurActive.face);
+}
+
 
 //! Used for setting the current face if it is a cubemap.
 ILboolean ILAPIENTRY ilActiveFace(ILuint Number)

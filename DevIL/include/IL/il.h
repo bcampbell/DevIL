@@ -527,6 +527,9 @@ typedef ILenum (ILAPIENTRY *IL_SAVEPROC)(ILconst_string);
 
 
 // ImageLib Functions
+// TODO: sort out the new ones
+ILAPI ILboolean ILAPIENTRY ilActiveFrame(ILuint Number);
+//
 ILAPI ILboolean ILAPIENTRY ilActiveFace(ILuint Number);
 ILAPI ILboolean ILAPIENTRY ilActiveImage(ILuint Number);
 ILAPI ILboolean ILAPIENTRY ilActiveLayer(ILuint Number);
