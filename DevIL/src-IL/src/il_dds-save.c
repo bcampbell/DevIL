@@ -1277,19 +1277,6 @@ ILAPI ILubyte* ILAPIENTRY ilCompressDXT(ILubyte *Data, ILuint Width, ILuint Heig
 	}
 #endif//IL_USE_DXTC_SQUISH
 
-	TempImage = (ILimage*)ialloc(sizeof(ILimage));
-	memset(TempImage, 0, sizeof(ILimage));
-	TempImage->Width = Width;
-	TempImage->Height = Height;
-	TempImage->Depth = Depth;
-	TempImage->Bpp = 4;  // RGBA or BGRA
-	TempImage->Format = IL_BGRA;
-	TempImage->Bpc = 1;  // Unsigned bytes only
-	TempImage->Type = IL_UNSIGNED_BYTE;
-	TempImage->SizeOfPlane = TempImage->Bps * Height;
-	TempImage->SizeOfData  = TempImage->SizeOfPlane * Depth;
-	TempImage->Origin = IL_ORIGIN_UPPER_LEFT;
-	TempImage->Data = Data;
 
 	BuffSize = ilGetDXTCData(NULL, 0, DXTCFormat);
 	if (BuffSize == 0)
@@ -1304,10 +1291,6 @@ ILAPI ILubyte* ILAPIENTRY ilCompressDXT(ILubyte *Data, ILuint Width, ILuint Heig
 	}
 	*DXTCSize = BuffSize;
 
-	// Restore backup of iCurImage.
-	iCurImage = CurImage;
-	TempImage->Data = NULL;
-	ilCloseImage(TempImage);
-
 	return Buffer;
 }
+
