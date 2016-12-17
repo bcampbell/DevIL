@@ -2,7 +2,6 @@
 //
 // ImageLib Sources
 // Copyright (C) 2000-2008 by Denton Woods
-// Last modified: 12/17/2008
 //
 // Filename: src-IL/src/il_stack.c
 //
@@ -102,7 +101,7 @@ static int slotid_cmp(const SlotID a, const SlotID b)
 
 static Slot* slot_create()
 {
-    const int initialcap = 1;
+    const int initialcap = 8;
     Slot* slot = ialloc(sizeof(Slot));
 
     if (slot==NULL) {
@@ -143,21 +142,30 @@ static void slot_delete(Slot* slot)
 // adds a new entry into the slot (assumes that id isn't present!)
 static int slot_add(Slot* slot, const SlotID id)
 {
+    ILimage* img;
+    int idx;
 
     if (slot->length >= slot->capacity) {
-        // TODO: grow the slot...
-        return -1;
+        // grow the slot...
+        int newcap = slot->capacity*2;
+        SlotEntry* newmem = ialloc(newcap * sizeof(SlotEntry));
+        if (newmem==NULL ) {
+            return -1;
+        }
+        memcpy( newmem, slot->images, slot->length*sizeof(SlotEntry));
+        ifree(slot->images);
+        slot->images = newmem;
+        slot->capacity = newcap;
     }
 
-    ILimage* img = ilNewImage(1,1,1,1,1);
+    img = ilNewImage(1,1,1,1,1);
     if (img==NULL) {
         return -1;
     }
 
-    // TODO: insert in order of id, so we can binarysearch
-
-    // for now... just append
-    int idx = slot->length;
+    // TODO: insert in order of id, so we can binary search
+    // but for now... just append
+    idx = slot->length;
     ++slot->length;
     slot->images[idx].id = id;
     slot->images[idx].img = img;
@@ -266,14 +274,21 @@ static ILboolean stack_allocslot(Stack* s, ILuint *found)
     // nope. grow.
     {
         int newcap = s->capacity*2;
-        Slot** old = s->slots;
-        s->slots = ialloc( newcap * sizeof(Slot) );
-        if (s->slots==NULL) {
+        Slot** newmem;
+        newmem = ialloc( newcap * sizeof(Slot) );
+        if (newmem==NULL) {
             return IL_FALSE;
         }
-        memcpy(s->slots, old, s->capacity * sizeof(Slot) );
-        ifree(old);
+        memcpy(newmem, s->slots, s->length * sizeof(Slot) );
+        ifree(s->slots);
+        s->slots = newmem;
         s->capacity = newcap;
+        // clear the newly-added space
+        for (idx=s->length; idx<s->capacity; ++idx) {
+            s->slots[idx] = NULL;
+        }
+
+        // now we can allocate one
         *found = s->length;
         ++s->length;
         return IL_TRUE;
